@@ -27,7 +27,6 @@ use crate::{
   monitor_state::MonitorState,
   providers::{ProviderEmission, ProviderManager},
   shell_state::ShellState,
-  sys_tray::SysTray,
   widget_factory::{WidgetFactory, WidgetOpenOptions},
   widget_pack::{
     MonitorSelection, WidgetPack, WidgetPackManager, WidgetPlacement,
@@ -45,7 +44,6 @@ mod monitor_state;
 mod providers;
 mod publish;
 mod shell_state;
-mod sys_tray;
 mod widget_factory;
 mod widget_pack;
 
@@ -229,22 +227,14 @@ async fn start_app(app: &mut tauri::App, cli: Cli) -> anyhow::Result<()> {
   // Open widgets based on CLI command.
   open_widgets_by_cli_command(cli, widget_factory.clone()).await?;
 
-  // Add application icon to system tray.
-  let tray = SysTray::new(
-    app.handle(),
-    app_settings.clone(),
-    widget_pack_manager.clone(),
-    widget_factory.clone(),
-  )
-  .await?;
-
+  // Logical Lunge: no tray icon / widget manager window -- the shell starts its
+  // own widget pack and is the only UI.
   listen_events(
     app.handle(),
     app_settings,
     widget_pack_manager,
     monitor_state,
     widget_factory,
-    tray,
     manager,
     emit_rx,
     install_rx,
@@ -265,7 +255,6 @@ fn listen_events(
   widget_pack_manager: Arc<WidgetPackManager>,
   monitor_state: Arc<MonitorState>,
   widget_factory: Arc<WidgetFactory>,
-  tray: SysTray,
   manager: Arc<ProviderManager>,
   mut emit_rx: mpsc::UnboundedReceiver<ProviderEmission>,
   mut install_rx: mpsc::Receiver<WidgetPack>,
@@ -285,23 +274,21 @@ fn listen_events(
       let res = tokio::select! {
         Ok(widget_state) = widget_open_rx.recv() => {
           info!("Widget opened.");
-          let _ = tray.refresh().await;
           let _ = app_handle.emit("widget-opened", widget_state);
           Ok(())
         },
         Ok(widget_id) = widget_close_rx.recv() => {
           info!("Widget closed.");
-          let _ = tray.refresh().await;
           let _ = app_handle.emit("widget-closed", widget_id);
           Ok(())
         },
         Ok(_) = settings_change_rx.recv() => {
           info!("Settings changed.");
-          tray.refresh().await
+          Ok(())
         },
         Ok(_) = widget_packs_change_rx.recv() => {
           info!("Widget packs changed.");
-          tray.refresh().await
+          Ok(())
         },
         Ok(_) = monitors_change_rx.recv() => {
           info!("Monitors changed.");

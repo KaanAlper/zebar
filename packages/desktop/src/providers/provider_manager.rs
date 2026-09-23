@@ -9,17 +9,13 @@ use tokio::{
 };
 use tracing::info;
 
-#[cfg(any(target_os = "macos", windows))]
-use super::komorebi::KomorebiProvider;
 #[cfg(windows)]
 use super::{
-  audio::AudioProvider, keyboard::KeyboardProvider, media::MediaProvider,
-  systray::SystrayProvider,
+  audio::AudioProvider, media::MediaProvider, systray::SystrayProvider,
 };
 use super::{
-  battery::BatteryProvider, cpu::CpuProvider, disk::DiskProvider,
-  host::HostProvider, ip::IpProvider, memory::MemoryProvider,
-  network::NetworkProvider, weather::WeatherProvider, Provider,
+  battery::BatteryProvider, cpu::CpuProvider, host::HostProvider,
+  memory::MemoryProvider, network::NetworkProvider, Provider,
   ProviderConfig, ProviderFunction, ProviderFunctionResponse,
   ProviderFunctionResult, ProviderOutput, RuntimeType,
 };
@@ -247,11 +243,6 @@ impl ProviderManager {
     common: CommonProviderState,
   ) -> anyhow::Result<(task::JoinHandle<()>, RuntimeType)> {
     let runtime_type = match config {
-      ProviderConfig::Ip(..) | ProviderConfig::Weather(..) => {
-        RuntimeType::Async
-      }
-      #[cfg(any(target_os = "macos", windows))]
-      ProviderConfig::Komorebi(..) => RuntimeType::Async,
       #[cfg(windows)]
       ProviderConfig::Systray(..) => RuntimeType::Async,
       _ => RuntimeType::Sync,
@@ -261,19 +252,6 @@ impl ProviderManager {
     let task_handle = match &runtime_type {
       RuntimeType::Async => task::spawn(async move {
         match config {
-          ProviderConfig::Ip(config) => {
-            let mut provider = IpProvider::new(config, common);
-            provider.start_async().await;
-          }
-          ProviderConfig::Weather(config) => {
-            let mut provider = WeatherProvider::new(config, common);
-            provider.start_async().await;
-          }
-          #[cfg(any(target_os = "macos", windows))]
-          ProviderConfig::Komorebi(config) => {
-            let mut provider = KomorebiProvider::new(config, common);
-            provider.start_async().await;
-          }
           #[cfg(windows)]
           ProviderConfig::Systray(config) => {
             let mut provider = SystrayProvider::new(config, common);
@@ -312,19 +290,12 @@ impl ProviderManager {
             let mut provider = MemoryProvider::new(config, common);
             provider.start_sync();
           }
-          ProviderConfig::Disk(config) => {
-            let mut provider = DiskProvider::new(config, common);
-            provider.start_sync();
-          }
+
           ProviderConfig::Network(config) => {
             let mut provider = NetworkProvider::new(config, common);
             provider.start_sync();
           }
-          #[cfg(windows)]
-          ProviderConfig::Keyboard(config) => {
-            let mut provider = KeyboardProvider::new(config, common);
-            provider.start_sync();
-          }
+
           _ => unreachable!(),
         }
 

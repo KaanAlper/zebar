@@ -1,14 +1,10 @@
+// Logical Lunge: only the providers the shell uses (disk, ip, keyboard,
+// komorebi and weather were removed).
 #[cfg(windows)]
 mod audio;
 mod battery;
 mod cpu;
-mod disk;
 mod host;
-mod ip;
-#[cfg(windows)]
-mod keyboard;
-#[cfg(any(target_os = "macos", windows))]
-mod komorebi;
 #[cfg(windows)]
 mod media;
 mod memory;
@@ -20,7 +16,6 @@ mod provider_manager;
 mod provider_output;
 #[cfg(windows)]
 mod systray;
-mod weather;
 
 pub use provider::*;
 pub use provider_config::*;

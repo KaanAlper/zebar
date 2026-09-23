@@ -2809,19 +2809,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "komorebi-util"
-version = "0.0.0"
-dependencies = [
- "dirs",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uds_windows",
-]
-
-[[package]]
 name = "kuchikiki"
 version = "0.8.8-speedreader"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7837,7 +7824,6 @@ dependencies = [
  "crossbeam",
  "flate2",
  "globset",
- "komorebi-util",
  "netdev",
  "regex",
  "reqwest 0.12.28",

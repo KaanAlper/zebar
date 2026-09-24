@@ -3,6 +3,7 @@ use std::{
   io::Cursor,
   path::{Path, PathBuf},
   sync::LazyLock,
+  time::{Duration, Instant},
 };
 
 use rocket::{
@@ -34,25 +35,48 @@ struct TokenAccess {
   file_patterns: Vec<String>,
 }
 
-pub async fn setup_asset_server() -> anyhow::Result<()> {
-  let rocket = rocket::build()
+fn build_asset_server() -> rocket::Rocket<rocket::Build> {
+  rocket::build()
     .configure(
       rocket::Config::figment().merge(("port", ASSET_SERVER_PORT)),
     )
-    .mount("/", routes![sw_js, normalize_css, init, serve]);
+    .mount("/", routes![sw_js, normalize_css, init, serve])
+}
 
-  // Test if the server can start (this doesn't block).
-  let rocket = rocket.ignite().await.map_err(|err| {
-    anyhow::anyhow!("Asset server failed to initialize: {:?}", err)
-  })?;
-
-  // Now launch it in the background.
+pub async fn setup_asset_server() -> anyhow::Result<()> {
+  // Launch in the background and keep retrying if the port can't be bound
+  // (e.g. it is still held by a previous Zebar instance that is shutting
+  // down). Previously a failed bind was only logged and Zebar ran without
+  // an asset server, so every widget showed a "connection refused" page.
   task::spawn(async move {
-    if let Err(err) = rocket.launch().await {
-      error!("Asset server failed during runtime: {:?}", err);
+    let mut attempt: u32 = 0;
+    loop {
+      match build_asset_server().launch().await {
+        Ok(_) => break,
+        Err(err) => {
+          attempt += 1;
+          error!("Asset server failed to start (attempt {attempt}): {:?}", err);
+          let delay = if attempt < 40 { 250 } else { 2000 };
+          tokio::time::sleep(Duration::from_millis(delay)).await;
+        }
+      }
     }
   });
 
+  // Don't open any widget before the server accepts connections, so a
+  // widget never loads a "connection refused" page.
+  let deadline = Instant::now() + Duration::from_secs(30);
+  while Instant::now() < deadline {
+    if tokio::net::TcpStream::connect(("127.0.0.1", ASSET_SERVER_PORT))
+      .await
+      .is_ok()
+    {
+      return Ok(());
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+  }
+
+  warn!("Asset server is still not reachable; opening widgets anyway.");
   Ok(())
 }
 

@@ -8,7 +8,7 @@ use anyhow::Context;
 use clap::Parser;
 use tauri::{
   async_runtime::block_on, path::BaseDirectory, AppHandle, Emitter,
-  Manager, RunEvent, WebviewUrl, WebviewWindowBuilder,
+  Manager, RunEvent,
 };
 use tokio::{sync::mpsc, task};
 use tracing::{error, info, Level};
@@ -107,7 +107,18 @@ async fn main() -> anyhow::Result<()> {
     .build(tauri::generate_context!())?;
 
   app.run(|app, event| {
-    if let RunEvent::ExitRequested { .. } = &event {
+    if let RunEvent::ExitRequested { code, api, .. } = &event {
+      // Logical Lunge: Tauri requests an exit when the last window closes
+      // (`code` is `None`). The shell keeps running without windows, so
+      // that request is refused here instead of keeping a hidden
+      // placeholder webview open (it started a second WebView2 browser:
+      // six processes, ~145 MB). Exits with a code (`AppHandle::exit`)
+      // cannot be prevented and proceed.
+      if code.is_none() {
+        api.prevent_exit();
+        return;
+      }
+
       // Deallocate any appbars on Windows.
       #[cfg(target_os = "windows")]
       {
@@ -200,10 +211,6 @@ async fn start_app(app: &mut tauri::App, cli: Cli) -> anyhow::Result<()> {
   // Logical Lunge: no tray icon, widget manager / settings window or
   // marketplace -- the shell starts its own widget pack and is the only UI.
   listen_events(app.handle(), monitor_state, widget_factory, manager, emit_rx);
-
-  // Placeholder window to keep the process running when all windows are
-  // closed.
-  create_placeholder_window(app.handle())?;
 
   Ok(())
 }
@@ -367,22 +374,3 @@ fn setup_logging(cli: &Cli, config_dir: &Path) -> anyhow::Result<()> {
   Ok(())
 }
 
-/// Creates a placeholder window to prevent Tauri from automatically
-/// exiting when all windows are closed.
-///
-/// By default, Tauri will trigger an exit request when all windows are
-/// closed. Tracking issue: https://github.com/tauri-apps/tauri/issues/13511
-fn create_placeholder_window(app: &tauri::AppHandle) -> tauri::Result<()> {
-  let _placeholder = WebviewWindowBuilder::new(
-    app,
-    "placeholder",
-    WebviewUrl::App("data:text/html,".into()),
-  )
-  .visible(false)
-  .skip_taskbar(true)
-  .decorations(false)
-  .closable(false)
-  .build()?;
-
-  Ok(())
-}

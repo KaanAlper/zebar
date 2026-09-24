@@ -8,12 +8,11 @@ use std::{
 use anyhow::Context;
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::Mutex;
 
 use crate::{
-  app_settings::{AppSettings, VERSION_NUMBER},
+  app_settings::AppSettings,
   common::{read_and_parse_json, LengthValue, PathExt},
-  marketplace_installer::{MarketplaceInstaller, MarketplacePackMetadata},
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -22,15 +21,13 @@ pub struct WidgetPack {
   /// Unique identifier for the pack.
   pub id: String,
 
-  /// Whether the pack is a local or marketplace pack.
+  /// Type of the pack (always a local pack; Logical Lunge has no
+  /// marketplace).
   pub r#type: WidgetPackType,
 
   /// Deserialized pack config.
   #[serde(flatten)]
   pub config: WidgetPackConfig,
-
-  /// Metadata for the pack (if it's a marketplace pack).
-  pub metadata: Option<MarketplacePackMetadata>,
 
   /// Path to the pack config file.
   pub config_path: PathBuf,
@@ -95,7 +92,6 @@ pub struct WidgetPackConfig {
 #[serde(rename_all = "camelCase")]
 pub enum WidgetPackType {
   Custom,
-  Marketplace,
 }
 
 /// Deserialized widget config.
@@ -290,144 +286,22 @@ impl DockEdge {
   }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateWidgetPackArgs {
-  pub name: String,
-  pub version: String,
-  pub description: String,
-  pub tags: Vec<String>,
-  pub repository_url: String,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UpdateWidgetPackArgs {
-  pub name: Option<String>,
-  pub version: Option<String>,
-  pub description: Option<String>,
-  pub tags: Option<Vec<String>>,
-  pub preview_images: Option<Vec<String>>,
-  pub repository_url: Option<String>,
-  pub widgets: Option<Vec<WidgetConfig>>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateWidgetConfigArgs {
-  pub name: String,
-  pub pack_id: String,
-  pub template: FrontendTemplate,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FrontendTemplate {
-  ReactBuildless,
-  SolidTypescript,
-}
-
 #[derive(Debug)]
 pub struct WidgetPackManager {
-  /// Reference to `AppSettings`.
-  app_settings: Arc<AppSettings>,
-
-  /// Reference to `MarketplaceInstaller`.
-  marketplace_installer: Arc<MarketplaceInstaller>,
-
   /// Map of widget packs by their ID's.
   pub widget_packs: Arc<Mutex<HashMap<String, WidgetPack>>>,
-
-  _widget_packs_change_rx:
-    broadcast::Receiver<HashMap<String, WidgetPack>>,
-
-  pub widget_packs_change_tx:
-    broadcast::Sender<HashMap<String, WidgetPack>>,
-
-  _widget_configs_change_rx: broadcast::Receiver<(String, WidgetConfig)>,
-
-  pub widget_configs_change_tx: broadcast::Sender<(String, WidgetConfig)>,
 }
 
 impl WidgetPackManager {
   /// Reads the pack config files within the config directory.
   ///
   /// Returns a new `WidgetPackManager` instance.
-  pub fn new(
-    app_settings: Arc<AppSettings>,
-    marketplace_installer: Arc<MarketplaceInstaller>,
-  ) -> anyhow::Result<Self> {
-    let widget_packs =
-      Self::read_widget_packs(&app_settings, &marketplace_installer)?;
-
-    let (widget_packs_change_tx, _widget_packs_change_rx) =
-      broadcast::channel(16);
-
-    let (widget_configs_change_tx, _widget_configs_change_rx) =
-      broadcast::channel(16);
+  pub fn new(app_settings: Arc<AppSettings>) -> anyhow::Result<Self> {
+    let widget_packs = Self::read_widget_packs(&app_settings.config_dir)?;
 
     Ok(Self {
-      app_settings,
-      marketplace_installer,
       widget_packs: Arc::new(Mutex::new(widget_packs)),
-      _widget_packs_change_rx,
-      widget_packs_change_tx,
-      _widget_configs_change_rx,
-      widget_configs_change_tx,
     })
-  }
-
-  /// Re-evaluates widget packs within the config directory.
-  pub async fn reload(&self) -> anyhow::Result<()> {
-    let new_widget_packs = Self::read_widget_packs(
-      &self.app_settings,
-      &self.marketplace_installer,
-    )?;
-
-    {
-      let mut widget_packs = self.widget_packs.lock().await;
-      *widget_packs = new_widget_packs.clone();
-    }
-
-    self.widget_packs_change_tx.send(new_widget_packs)?;
-
-    Ok(())
-  }
-
-  /// Reads all widget packs from:
-  ///  - The user's config directory.
-  ///  - The marketplace directory.
-  ///
-  /// Returns a hashmap of widget pack ID's to `WidgetPack` instances.
-  fn read_widget_packs(
-    app_settings: &AppSettings,
-    marketplace_installer: &MarketplaceInstaller,
-  ) -> anyhow::Result<HashMap<String, WidgetPack>> {
-    let mut packs = HashMap::new();
-
-    packs
-      .extend(Self::read_custom_widget_packs(&app_settings.config_dir)?);
-
-    for metadata in marketplace_installer.installed_packs_metadata()? {
-      if let Ok(pack) = Self::read_widget_pack(
-        &app_settings
-          .marketplace_pack_download_dir(
-            &metadata.pack_id,
-            &metadata.version,
-          )
-          .join("zpack.json"),
-        Some(&metadata),
-      ) {
-        packs.insert(metadata.pack_id.clone(), pack);
-      } else {
-        tracing::warn!(
-          "Skipping marketplace pack at '{}' because it is invalid.",
-          metadata.pack_id
-        );
-      }
-    }
-
-    Ok(packs)
   }
 
   /// Finds all valid widget packs within the user's config directory.
@@ -436,7 +310,7 @@ impl WidgetPackManager {
   /// (i.e. `<CONFIG_DIR>/*/zpack.json`).
   ///
   /// Returns a hashmap of widget pack ID's to `WidgetPack` instances.
-  fn read_custom_widget_packs(
+  fn read_widget_packs(
     config_dir: &Path,
   ) -> anyhow::Result<HashMap<String, WidgetPack>> {
     // Get paths to the subdirectories within the config directory.
@@ -465,7 +339,7 @@ impl WidgetPackManager {
         continue;
       }
 
-      match Self::read_widget_pack(&pack_config_path, None) {
+      match Self::read_widget_pack(&pack_config_path) {
         Ok(pack) => {
           tracing::info!(
             "Found valid widget pack at: {}",
@@ -487,10 +361,7 @@ impl WidgetPackManager {
   /// file (`zpack.json`) to be present.
   ///
   /// Returns a `WidgetPack` instance.
-  pub fn read_widget_pack(
-    config_path: &Path,
-    metadata: Option<&MarketplacePackMetadata>,
-  ) -> anyhow::Result<WidgetPack> {
+  pub fn read_widget_pack(config_path: &Path) -> anyhow::Result<WidgetPack> {
     let pack_config = read_and_parse_json::<WidgetPackConfig>(config_path)
       .map_err(|err| {
         anyhow::anyhow!(
@@ -508,18 +379,11 @@ impl WidgetPackManager {
     })?;
 
     let pack = WidgetPack {
-      id: match metadata {
-        Some(metadata) => metadata.pack_id.clone(),
-        None => pack_config.name.to_string(),
-      },
-      r#type: match metadata {
-        Some(_) => WidgetPackType::Marketplace,
-        None => WidgetPackType::Custom,
-      },
+      id: pack_config.name.to_string(),
+      r#type: WidgetPackType::Custom,
       config_path: config_path.canonicalize_pretty()?,
       directory_path: pack_dir.canonicalize_pretty()?,
       config: pack_config,
-      metadata: metadata.cloned(),
     };
 
     Ok(pack)
@@ -537,307 +401,6 @@ impl WidgetPackManager {
   ) -> Option<WidgetPack> {
     let widget_packs = self.widget_packs.lock().await;
     widget_packs.get(pack_id).cloned()
-  }
-
-  /// Finds a custom widget pack by ID.
-  ///
-  /// Returns an error if the widget pack is not found or is not a
-  /// custom pack.
-  async fn find_custom_widget_pack(
-    &self,
-    pack_id: &str,
-  ) -> anyhow::Result<WidgetPack> {
-    self
-      .widget_pack_by_id(pack_id)
-      .await
-      .filter(|pack| pack.r#type == WidgetPackType::Custom)
-      .context(format!("Custom widget pack not found: {}", pack_id))
-  }
-
-  /// Updates the widget config for the given pack and widget name.
-  pub async fn update_widget_config(
-    &self,
-    pack_id: &str,
-    widget_name: &str,
-    new_config: WidgetConfig,
-  ) -> anyhow::Result<WidgetConfig> {
-    tracing::info!("Updating widget config for {}.", widget_name);
-
-    let pack = self.find_custom_widget_pack(pack_id).await?;
-
-    let mut widgets = pack.config.widgets.clone();
-    let widget_index = widgets
-      .iter()
-      .position(|w| w.name == widget_name)
-      .context(format!("Widget config not found for {}.", widget_name))?;
-
-    widgets[widget_index] = new_config.clone();
-
-    // Update the pack config to persist changes to disk.
-    self
-      .update_widget_pack(
-        pack_id,
-        UpdateWidgetPackArgs {
-          widgets: Some(widgets),
-          ..Default::default()
-        },
-      )
-      .await?;
-
-    // Emit the changed config.
-    self
-      .widget_configs_change_tx
-      .send((pack_id.to_string(), new_config.clone()))?;
-
-    Ok(new_config)
-  }
-
-  /// Creates a new widget pack.
-  pub async fn create_widget_pack(
-    &self,
-    args: CreateWidgetPackArgs,
-  ) -> anyhow::Result<WidgetPack> {
-    let pack_dir = self.app_settings.config_dir.join(&args.name);
-
-    let mut context = tera::Context::new();
-    context.insert("PACK_NAME", &args.name);
-    context.insert("PACK_VERSION", &args.version);
-    context.insert("PACK_DESCRIPTION", &args.description);
-    context.insert("PACK_TAGS", &args.tags);
-    context.insert("REPOSITORY_URL", &args.repository_url);
-    context.insert("ZEBAR_VERSION", &VERSION_NUMBER.to_string());
-
-    self.app_settings.init_template(
-      Path::new("pack-template"),
-      &pack_dir,
-      &context,
-    )?;
-
-    // Initialize git repository. Ignore errors (in case Git is not
-    // installed).
-    let _ = std::process::Command::new("git")
-      .arg("init")
-      .current_dir(&pack_dir)
-      .output();
-
-    let pack = Self::read_widget_pack(&pack_dir.join("zpack.json"), None)?;
-
-    // Add the new widget pack to state.
-    {
-      let mut widget_packs = self.widget_packs.lock().await;
-      widget_packs.insert(pack.id.clone(), pack.clone());
-
-      // Broadcast the change.
-      let _ = self.widget_packs_change_tx.send(widget_packs.clone());
-    }
-
-    Ok(pack)
-  }
-
-  /// Updates a widget pack.
-  pub async fn update_widget_pack(
-    &self,
-    pack_id: &str,
-    args: UpdateWidgetPackArgs,
-  ) -> anyhow::Result<WidgetPack> {
-    let mut pack = self.find_custom_widget_pack(pack_id).await?;
-    let pack_id = pack.id.clone();
-
-    // Update pack config fields.
-    pack.config.name = args.name.clone().unwrap_or(pack.config.name);
-    pack.config.version = args.version.unwrap_or(pack.config.version);
-    pack.config.description =
-      args.description.unwrap_or(pack.config.description);
-    pack.config.tags = args.tags.unwrap_or(pack.config.tags);
-    pack.config.preview_images =
-      args.preview_images.unwrap_or(pack.config.preview_images);
-    pack.config.repository_url =
-      args.repository_url.unwrap_or(pack.config.repository_url);
-    pack.config.widgets = args.widgets.unwrap_or(pack.config.widgets);
-
-    // Write the updated pack config to file.
-    fs::write(
-      &pack.config_path,
-      serde_json::to_string_pretty(&pack.config)? + "\n",
-    )?;
-
-    let mut widget_packs = self.widget_packs.lock().await;
-
-    // Update the pack ID and remove the old entry if a new name is
-    // provided.
-    if let Some(new_name) = args.name {
-      pack.id = new_name;
-      widget_packs.remove(&pack_id);
-    }
-
-    // Broadcast the change.
-    widget_packs.insert(pack.id.clone(), pack.clone());
-    let _ = self.widget_packs_change_tx.send(widget_packs.clone());
-
-    Ok(pack)
-  }
-
-  /// Deletes a widget pack.
-  ///
-  /// Removes the pack directory and all its contents.
-  pub async fn delete_widget_pack(
-    &self,
-    pack_id: &str,
-  ) -> anyhow::Result<()> {
-    let pack = self
-      .widget_pack_by_id(pack_id)
-      .await
-      .with_context(|| format!("Widget pack not found: {}", pack_id))?;
-
-    match pack.r#type {
-      WidgetPackType::Custom => {
-        // Remove the directory with all widget files.
-        fs::remove_dir_all(&pack.directory_path)?;
-      }
-      WidgetPackType::Marketplace => {
-        self.marketplace_installer.delete_metadata(pack_id)?;
-      }
-    }
-
-    // Remove the pack from state.
-    {
-      let mut widget_packs = self.widget_packs.lock().await;
-      widget_packs.remove(pack_id);
-
-      // Broadcast the change.
-      let _ = self.widget_packs_change_tx.send(widget_packs.clone());
-    }
-
-    // Remove startup configs for the removed pack.
-    self
-      .app_settings
-      .remove_startup_config(pack_id, None, None)
-      .await?;
-
-    // TODO: Kill active widget instances from the removed pack.
-
-    Ok(())
-  }
-
-  /// Creates a new widget from a template.
-  ///
-  /// Adds a new entry to the pack config and copies the appropriate
-  /// frontend template (e.g. React, Solid) to the widget's sub-directory.
-  pub async fn create_widget_config(
-    &self,
-    args: CreateWidgetConfigArgs,
-  ) -> anyhow::Result<WidgetConfig> {
-    let pack = self.find_custom_widget_pack(&args.pack_id).await?;
-    let widget_dir = pack.directory_path.join(&args.name);
-
-    let template_path = match args.template {
-      FrontendTemplate::ReactBuildless => {
-        "widget-templates/react-buildless"
-      }
-      FrontendTemplate::SolidTypescript => "widget-templates/solid-ts",
-    };
-
-    let mut context = tera::Context::new();
-    context.insert("WIDGET_NAME", &args.name);
-    context.insert("ZEBAR_VERSION", &VERSION_NUMBER.to_string());
-
-    self.app_settings.init_template(
-      &Path::new(template_path),
-      &widget_dir,
-      &context,
-    )?;
-
-    let widget_config = WidgetConfig {
-      name: args.name.clone(),
-      html_path: match args.template {
-        FrontendTemplate::ReactBuildless => {
-          format!("{}/index.html", args.name).into()
-        }
-        FrontendTemplate::SolidTypescript => {
-          format!("{}/dist/index.html", args.name).into()
-        }
-      },
-      z_order: ZOrder::Normal,
-      shown_in_taskbar: false,
-      focused: false,
-      resizable: false,
-      transparent: false,
-      include_files: match args.template {
-        FrontendTemplate::ReactBuildless => {
-          vec![format!("{}/**", args.name)]
-        }
-        FrontendTemplate::SolidTypescript => {
-          vec![format!("{}/dist/**", args.name)]
-        }
-      },
-      caching: WidgetCaching::default(),
-      privileges: WidgetPrivileges::default(),
-      presets: vec![WidgetPreset {
-        name: "default".to_string(),
-        placement: WidgetPlacement {
-          anchor: AnchorPoint::TopLeft,
-          offset_x: "0px".parse()?,
-          offset_y: "0px".parse()?,
-          width: "100%".parse()?,
-          height: "40px".parse()?,
-          monitor_selection: MonitorSelection::All,
-          dock_to_edge: DockConfig::default(),
-        },
-      }],
-    };
-
-    // Add widget to pack config.
-    let mut widgets = pack.config.widgets.clone();
-    widgets.push(widget_config.clone());
-
-    self
-      .update_widget_pack(
-        &args.pack_id,
-        UpdateWidgetPackArgs {
-          widgets: Some(widgets),
-          ..Default::default()
-        },
-      )
-      .await?;
-
-    Ok(widget_config)
-  }
-
-  /// Deletes a widget from a pack.
-  ///
-  /// Removes the entry from the pack config and deletes the widget's
-  /// sub-directory.
-  pub async fn delete_widget_config(
-    &self,
-    pack_id: &str,
-    widget_name: &str,
-  ) -> anyhow::Result<()> {
-    let pack = self.find_custom_widget_pack(pack_id).await?;
-
-    // Remove widget from pack config.
-    let mut widgets = pack.config.widgets.clone();
-    widgets.retain(|widget| widget.name != widget_name);
-
-    self
-      .update_widget_pack(
-        pack_id,
-        UpdateWidgetPackArgs {
-          widgets: Some(widgets),
-          ..Default::default()
-        },
-      )
-      .await?;
-
-    Ok(())
-  }
-
-  /// Registers a newly installed widget pack.
-  pub async fn register_widget_pack(&self, pack: WidgetPack) {
-    let mut widget_packs = self.widget_packs.lock().await;
-    widget_packs.insert(pack.id.clone(), pack);
-
-    // Broadcast the change.
-    let _ = self.widget_packs_change_tx.send(widget_packs.clone());
   }
 }
 

@@ -770,28 +770,6 @@ impl WidgetFactory {
     Ok(())
   }
 
-  /// Stops any currently running preview widget(s).
-  pub async fn stop_all_previews(&self) -> anyhow::Result<()> {
-    tracing::info!("Stopping all preview widgets.");
-
-    // Find widget states marked as previews.
-    let preview_widget_ids = {
-      let widget_states = self.widget_states.lock().await;
-      widget_states
-        .iter()
-        .filter(|(_, state)| state.is_preview)
-        .map(|(id, _)| id.clone())
-        .collect::<Vec<_>>()
-    };
-
-    // Stop each preview widget.
-    for widget_id in preview_widget_ids {
-      self.stop_by_id(&widget_id)?;
-    }
-
-    Ok(())
-  }
-
   /// Relaunches all currently open widgets.
   pub async fn relaunch_all(&self) -> anyhow::Result<()> {
     let widget_ids =
@@ -843,28 +821,6 @@ impl WidgetFactory {
     }
 
     Ok(())
-  }
-
-  /// Relaunches widgets with the given config paths.
-  pub async fn relaunch_by_name(
-    &self,
-    pack_id: &str,
-    widget_name: &str,
-  ) -> anyhow::Result<()> {
-    let widget_ids = {
-      self
-        .widget_states
-        .lock()
-        .await
-        .iter()
-        .filter(|(_, state)| {
-          state.pack_id == *pack_id && state.name == *widget_name
-        })
-        .map(|(id, _)| id.clone())
-        .collect::<Vec<_>>()
-    };
-
-    self.relaunch_by_ids(&widget_ids).await
   }
 
   /// Clears the cache for all open widgets.

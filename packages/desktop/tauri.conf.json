@@ -1,8 +1,7 @@
 {
   "$schema": "node_modules/@tauri-apps/cli/config.schema.json",
   "build": {
-    "devUrl": "http://localhost:4200",
-    "frontendDist": "../settings-ui/dist"
+    "frontendDist": "./frontend"
   },
   "productName": "Zebar",
   "version": "0.0.0",
@@ -36,7 +35,7 @@
     "security": {
       "csp": {
         "default-src": "'self' asset:",
-        "connect-src": "ipc: http://ipc.localhost https://api.glzr.io https://*.supabase.co",
+        "connect-src": "ipc: http://ipc.localhost",
         "img-src": "data: blob: *",
         "style-src": "'self' 'unsafe-inline'"
       },

@@ -23,14 +23,11 @@ use crate::{
   app_settings::AppSettings,
   asset_server::setup_asset_server,
   cli::{Cli, CliCommand, MonitorType, QueryArgs},
-  marketplace_installer::MarketplaceInstaller,
   monitor_state::MonitorState,
   providers::{ProviderEmission, ProviderManager},
   shell_state::ShellState,
   widget_factory::{WidgetFactory, WidgetOpenOptions},
-  widget_pack::{
-    MonitorSelection, WidgetPack, WidgetPackManager, WidgetPlacement,
-  },
+  widget_pack::{MonitorSelection, WidgetPackManager, WidgetPlacement},
 };
 
 mod app_settings;
@@ -39,10 +36,8 @@ mod cli;
 mod commands;
 mod common;
 mod config_migration;
-mod marketplace_installer;
 mod monitor_state;
 mod providers;
-mod publish;
 mod shell_state;
 mod widget_factory;
 mod widget_pack;
@@ -75,11 +70,6 @@ async fn main() -> anyhow::Result<()> {
 
           match cli.command() {
             CliCommand::Query(args) => output_query(app, args),
-            CliCommand::Publish(args) => {
-              let result = publish::publish_widget_pack(&args).await;
-              cli::print_and_exit(result);
-              Ok(())
-            }
             _ => {
               let start_res = start_app(app, cli).await;
 
@@ -104,18 +94,9 @@ async fn main() -> anyhow::Result<()> {
       commands::start_widget,
       commands::start_widget_preset,
       commands::stop_widget_preset,
-      commands::update_widget_config,
-      commands::create_widget_pack,
-      commands::update_widget_pack,
-      commands::delete_widget_pack,
-      commands::create_widget_config,
-      commands::delete_widget_config,
       commands::listen_provider,
       commands::unlisten_provider,
       commands::call_provider_function,
-      commands::install_widget_pack,
-      commands::start_preview_widget,
-      commands::stop_all_preview_widgets,
       commands::set_always_on_top,
       commands::set_skip_taskbar,
       commands::shell_exec,
@@ -170,16 +151,9 @@ async fn start_app(app: &mut tauri::App, cli: Cli) -> anyhow::Result<()> {
   let app_settings = Arc::new(AppSettings::new(app.handle(), config_dir)?);
   app.manage(app_settings.clone());
 
-  // Initialize `MarketplaceInstaller` in Tauri state.
-  let (marketplace_installer, install_rx) =
-    MarketplaceInstaller::new(app.handle(), app_settings.clone())?;
-  app.manage(marketplace_installer.clone());
-
   // Initialize `WidgetPackManager` in Tauri state.
-  let widget_pack_manager = Arc::new(WidgetPackManager::new(
-    app_settings.clone(),
-    marketplace_installer.clone(),
-  )?);
+  let widget_pack_manager =
+    Arc::new(WidgetPackManager::new(app_settings.clone())?);
   app.manage(widget_pack_manager.clone());
 
   // Initialize `MonitorState` in Tauri state.
@@ -207,14 +181,10 @@ async fn start_app(app: &mut tauri::App, cli: Cli) -> anyhow::Result<()> {
   #[cfg(target_os = "macos")]
   app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-  // Allow assets to be resolved from the config directory and the
-  // marketplace download directory.
-  for dir in [
-    &app_settings.config_dir,
-    &app_settings.marketplace_download_dir,
-  ] {
-    app.asset_protocol_scope().allow_directory(dir, true)?;
-  }
+  // Allow assets to be resolved from the config directory.
+  app
+    .asset_protocol_scope()
+    .allow_directory(&app_settings.config_dir, true)?;
 
   app.manage(ShellState::new(app.handle(), widget_factory.clone()));
   app.handle().plugin(tauri_plugin_dialog::init())?;
@@ -227,18 +197,9 @@ async fn start_app(app: &mut tauri::App, cli: Cli) -> anyhow::Result<()> {
   // Open widgets based on CLI command.
   open_widgets_by_cli_command(cli, widget_factory.clone()).await?;
 
-  // Logical Lunge: no tray icon / widget manager window -- the shell starts its
-  // own widget pack and is the only UI.
-  listen_events(
-    app.handle(),
-    app_settings,
-    widget_pack_manager,
-    monitor_state,
-    widget_factory,
-    manager,
-    emit_rx,
-    install_rx,
-  );
+  // Logical Lunge: no tray icon, widget manager / settings window or
+  // marketplace -- the shell starts its own widget pack and is the only UI.
+  listen_events(app.handle(), monitor_state, widget_factory, manager, emit_rx);
 
   // Placeholder window to keep the process running when all windows are
   // closed.
@@ -248,26 +209,17 @@ async fn start_app(app: &mut tauri::App, cli: Cli) -> anyhow::Result<()> {
 }
 
 /// Listens for events and updates state accordingly.
-#[allow(clippy::too_many_arguments)]
 fn listen_events(
   app_handle: &AppHandle,
-  app_settings: Arc<AppSettings>,
-  widget_pack_manager: Arc<WidgetPackManager>,
   monitor_state: Arc<MonitorState>,
   widget_factory: Arc<WidgetFactory>,
   manager: Arc<ProviderManager>,
   mut emit_rx: mpsc::UnboundedReceiver<ProviderEmission>,
-  mut install_rx: mpsc::Receiver<WidgetPack>,
 ) {
   let app_handle = app_handle.clone();
   let mut widget_open_rx = widget_factory.open_tx.subscribe();
   let mut widget_close_rx = widget_factory.close_tx.subscribe();
-  let mut settings_change_rx = app_settings.settings_change_tx.subscribe();
   let mut monitors_change_rx = monitor_state.change_tx.subscribe();
-  let mut widget_configs_change_rx =
-    widget_pack_manager.widget_configs_change_tx.subscribe();
-  let mut widget_packs_change_rx =
-    widget_pack_manager.widget_packs_change_tx.subscribe();
 
   task::spawn(async move {
     loop {
@@ -282,33 +234,14 @@ fn listen_events(
           let _ = app_handle.emit("widget-closed", widget_id);
           Ok(())
         },
-        Ok(_) = settings_change_rx.recv() => {
-          info!("Settings changed.");
-          Ok(())
-        },
-        Ok(_) = widget_packs_change_rx.recv() => {
-          info!("Widget packs changed.");
-          Ok(())
-        },
         Ok(_) = monitors_change_rx.recv() => {
           info!("Monitors changed.");
           widget_factory.relaunch_all().await
-        },
-        Ok((pack_id, changed_config)) = widget_configs_change_rx.recv() => {
-          info!("Widget config changed.");
-          widget_factory
-            .relaunch_by_name(&pack_id, &changed_config.name)
-            .await
         },
         Some(provider_emission) = emit_rx.recv() => {
           info!("Provider emission: {:?}", provider_emission);
           let _ = app_handle.emit("provider-emit", provider_emission.clone());
           manager.update_cache(provider_emission).await;
-          Ok(())
-        },
-        Some(pack) = install_rx.recv() => {
-          info!("Widget pack installed: {:?}", pack);
-          widget_pack_manager.register_widget_pack(pack).await;
           Ok(())
         },
       };

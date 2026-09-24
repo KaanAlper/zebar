@@ -7,12 +7,11 @@ use std::{
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use tauri::{path::BaseDirectory, AppHandle, Manager};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::Mutex;
 
 use crate::{
-  common::{copy_dir_all, read_and_parse_json, visit_deep, PathExt},
+  common::{read_and_parse_json, PathExt},
   config_migration::apply_config_migrations,
-  marketplace_installer::STARTER_PACK_ID,
 };
 
 pub const VERSION_NUMBER: &str = env!("VERSION_NUMBER");
@@ -43,33 +42,14 @@ pub struct StartupConfig {
 
 #[derive(Debug)]
 pub struct AppSettings {
-  /// Handle to the Tauri application.
-  app_handle: AppHandle,
-
-  /// Indicates if the settings file was created during initialization.
-  pub is_first_run: bool,
-
   /// Directory where config files are stored.
   pub config_dir: PathBuf,
 
   /// Directory where webview cache files are stored.
   pub webview_cache_dir: PathBuf,
 
-  /// Directory where marketplace metadata files are stored.
-  pub marketplace_meta_dir: PathBuf,
-
-  /// Directory where downloaded marketplace widget packs are stored.
-  pub marketplace_download_dir: PathBuf,
-
-  /// Path to the config migration file.
-  pub migration_file: PathBuf,
-
   /// Parsed app settings value.
   pub value: Arc<Mutex<AppSettingsValue>>,
-
-  _settings_change_rx: broadcast::Receiver<AppSettingsValue>,
-
-  pub settings_change_tx: broadcast::Sender<AppSettingsValue>,
 }
 
 impl AppSettings {
@@ -83,134 +63,89 @@ impl AppSettings {
       .resolve("zebar/webview-cache", BaseDirectory::Data)
       .context("Unable to resolve app data directory.")?;
 
-    let marketplace_meta_dir = config_dir.join(".marketplace");
-
-    let marketplace_download_dir = app_handle
-      .path()
-      .resolve("zebar/downloads", BaseDirectory::Data)
-      .context("Unable to resolve app data directory.")?;
-
     let migration_file = app_handle
       .path()
       .resolve("zebar/.migrations.json", BaseDirectory::Data)
       .context("Unable to resolve config migration file.")?;
 
-    for dir in [
-      &config_dir,
-      &webview_cache_dir,
-      &marketplace_meta_dir,
-      &marketplace_download_dir,
-    ] {
+    for dir in [&config_dir, &webview_cache_dir] {
       fs::create_dir_all(dir)?;
     }
 
-    let (settings, is_first_run) =
-      Self::read_settings_or_init(&config_dir, &migration_file)?;
-
-    let (settings_change_tx, _settings_change_rx) = broadcast::channel(16);
+    let settings = Self::read_settings_or_init(&config_dir, &migration_file);
 
     Ok(Self {
-      app_handle: app_handle.clone(),
-      is_first_run,
       config_dir: config_dir.canonicalize_pretty()?,
       webview_cache_dir: webview_cache_dir.canonicalize_pretty()?,
-      marketplace_meta_dir: marketplace_meta_dir.canonicalize_pretty()?,
-      marketplace_download_dir: marketplace_download_dir
-        .canonicalize_pretty()?,
-      migration_file,
       value: Arc::new(Mutex::new(settings)),
-      _settings_change_rx,
-      settings_change_tx,
     })
   }
 
-  /// Re-evaluates app settings and broadcasts the change.
-  pub async fn reload(&self) -> anyhow::Result<()> {
-    let (new_settings, _) =
-      Self::read_settings_or_init(&self.config_dir, &self.migration_file)?;
-
-    {
-      let mut settings = self.value.lock().await;
-      *settings = new_settings.clone();
-    }
-
-    self.settings_change_tx.send(new_settings)?;
-
-    Ok(())
-  }
-
-  /// Reads the app settings file or initializes it with the template.
+  /// Reads the app settings file or initializes it with the default.
   ///
-  /// Returns the parsed `AppSettingsValue` and a boolean indicating if
-  /// the settings file was created.
+  /// Logical Lunge: never fails. A settings file that can't be read or
+  /// parsed (e.g. edited by hand) is left untouched and the shell's
+  /// default widgets start instead; otherwise the bar would never come
+  /// back and the watchdog would restart Zebar in a loop.
   fn read_settings_or_init(
     config_dir: &Path,
     migration_file: &Path,
-  ) -> anyhow::Result<(AppSettingsValue, bool)> {
+  ) -> AppSettingsValue {
     // Apply any pending config migrations before reading the settings
     // file.
-    apply_config_migrations(config_dir, migration_file)?;
-
-    let settings_path = config_dir.join("settings.json");
-    let is_found = settings_path.exists();
-
-    // If the file does not exist, initialize a default.
-    if !is_found {
-      Self::create_default(config_dir)?;
+    if let Err(err) = apply_config_migrations(config_dir, migration_file) {
+      tracing::warn!("Failed to apply config migrations: {:?}", err);
     }
 
-    let settings = read_and_parse_json(&settings_path)?;
-    Ok((settings, !is_found))
-  }
-
-  /// Writes to the app settings file.
-  async fn write_settings(
-    &self,
-    new_settings: AppSettingsValue,
-  ) -> anyhow::Result<()> {
-    let settings_path = self.config_dir.join("settings.json");
-
-    fs::write(
-      &settings_path,
-      serde_json::to_string_pretty(&new_settings)? + "\n",
-    )?;
-
-    let mut settings = self.value.lock().await;
-    *settings = new_settings.clone();
-
-    self.settings_change_tx.send(new_settings)?;
-
-    Ok(())
-  }
-
-  /// Initializes app settings to the given path.
-  ///
-  /// `settings.json` is initialized with either `vanilla` or
-  /// `with-glazewm` from the `glzr-io/starter` widget pack as
-  /// startup config.
-  fn create_default(config_dir: &Path) -> anyhow::Result<()> {
-    tracing::info!("Initializing app settings from default.",);
-
-    let default_settings = AppSettingsValue {
-      schema: Some(format!(
-        "https://github.com/glzr-io/zebar/raw/v{}/resources/settings-schema.json",
-        VERSION_NUMBER
-      )),
-      startup_configs: vec![StartupConfig {
-        pack: STARTER_PACK_ID.into(),
-        widget: match is_app_installed("glazewm") {
-          true => "with-glazewm".into(),
-          false => "vanilla".into(),
-        },
-        preset: "default".into(),
-      }],
-    };
-
     let settings_path = config_dir.join("settings.json");
 
+    // If the file does not exist, initialize a default.
+    if !settings_path.exists() {
+      if let Err(err) = Self::write_default(&settings_path) {
+        tracing::warn!("Failed to write default settings: {:?}", err);
+      }
+    }
+
+    read_and_parse_json(&settings_path).unwrap_or_else(|err| {
+      tracing::error!(
+        "Invalid settings file, starting the default widgets: {:?}",
+        err
+      );
+      Self::default_value()
+    })
+  }
+
+  /// Default settings: the Logical Lunge shell's widgets (the same list
+  /// the installer writes).
+  fn default_value() -> AppSettingsValue {
+    AppSettingsValue {
+      schema: None,
+      startup_configs: [
+        "bar",
+        "overview",
+        "sidebar-right",
+        "toast",
+        "osk",
+        "update",
+        "session",
+      ]
+      .into_iter()
+      .map(|widget| StartupConfig {
+        pack: "logical-lunge".into(),
+        widget: widget.into(),
+        preset: "default".into(),
+      })
+      .collect(),
+    }
+  }
+
+  /// Writes the default settings to the given settings file path.
+  fn write_default(settings_path: &Path) -> anyhow::Result<()> {
+    tracing::info!("Initializing app settings from default.");
+
     fs::write(
-      &settings_path,
-      serde_json::to_string_pretty(&default_settings)? + "\n",
+      settings_path,
+      serde_json::to_string_pretty(&Self::default_value())? + "\n",
     )?;
 
     Ok(())
@@ -219,169 +154,5 @@ impl AppSettings {
   /// Returns the widget configs to open on startup.
   pub async fn startup_configs(&self) -> Vec<StartupConfig> {
     self.value.lock().await.startup_configs.clone()
-  }
-
-  /// Adds the given config to be launched on startup.
-  pub async fn add_startup_config(
-    &self,
-    pack_id: &str,
-    widget_name: &str,
-    preset_name: &str,
-  ) -> anyhow::Result<()> {
-    let mut new_settings = { self.value.lock().await.clone() };
-
-    let startup_config = StartupConfig {
-      pack: pack_id.to_string(),
-      widget: widget_name.to_string(),
-      preset: preset_name.to_string(),
-    };
-
-    if new_settings.startup_configs.contains(&startup_config) {
-      return Ok(());
-    }
-
-    new_settings.startup_configs.push(startup_config);
-    self.write_settings(new_settings).await
-  }
-
-  /// Removes startup configs matching the given criteria.
-  ///
-  /// Matches `pack_id` and optionally `widget_name` and `preset_name`.
-  /// When optional parameters are `None`, they match any value.
-  pub async fn remove_startup_config(
-    &self,
-    pack_id: &str,
-    widget_name: Option<&str>,
-    preset_name: Option<&str>,
-  ) -> anyhow::Result<()> {
-    let mut new_settings = { self.value.lock().await.clone() };
-
-    new_settings.startup_configs.retain(|config| {
-      config.pack != pack_id
-        || widget_name.map_or(false, |w| config.widget != w)
-        || preset_name.map_or(false, |p| config.preset != p)
-    });
-
-    self.write_settings(new_settings).await
-  }
-
-  /// Opens the config directory in the OS-dependent file explorer.
-  pub fn open_config_dir(&self) -> anyhow::Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-      std::process::Command::new("explorer")
-        .arg(self.config_dir.clone())
-        .spawn()?;
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-      std::process::Command::new("open")
-        .arg(self.config_dir.clone())
-        .arg("-R")
-        .spawn()?;
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-      std::process::Command::new("xdg-open")
-        .arg(self.config_dir.clone())
-        .spawn()?;
-    }
-
-    Ok(())
-  }
-
-  /// Copies and processes a template to the destination directory.
-  pub fn init_template(
-    &self,
-    template_path: &Path,
-    dest_dir: &Path,
-    context: &tera::Context,
-  ) -> anyhow::Result<()> {
-    // Resolve the full path to template directory.
-    let template_dir = self
-      .app_handle
-      .path()
-      .resolve(
-        Path::new("../../resources/templates").join(template_path),
-        BaseDirectory::Resource,
-      )
-      .with_context(|| {
-        format!(
-          "Unable to resolve {} template resource.",
-          template_path.display()
-        )
-      })?;
-
-    tracing::info!(
-      "Copying template from {} to {}",
-      template_dir.display(),
-      dest_dir.display()
-    );
-
-    // Copy all template files.
-    copy_dir_all(&template_dir, dest_dir, false)?;
-
-    // Run Tera template engine on all files with a `.tera` extension.
-    visit_deep(dest_dir, &mut |entry| {
-      if let Some(file_name) = entry.file_name().to_str() {
-        if file_name.ends_with(".tera") {
-          let path = entry.path();
-
-          if let Ok(contents) = fs::read_to_string(&path) {
-            // Render the template using Tera.
-            if let Ok(result) =
-              tera::Tera::one_off(&contents, context, true)
-            {
-              let _ = fs::write(&path, result);
-            }
-
-            // Remove `.tera` extension from processed files.
-            let file_name = file_name.replace(".tera", "");
-            let _ = fs::rename(&path, path.with_file_name(file_name));
-          }
-        }
-      }
-    })
-  }
-
-  /// Returns the path to the extracted marketplace pack directory.
-  pub fn marketplace_pack_download_dir(
-    &self,
-    pack_id: &str,
-    version: &str,
-  ) -> PathBuf {
-    self
-      .marketplace_download_dir
-      .join(format!("{}@{}", pack_id, version))
-  }
-
-  /// Returns the path to the metadata file for a marketplace pack.
-  pub fn marketplace_pack_metadata_path(&self, pack_id: &str) -> PathBuf {
-    self.marketplace_meta_dir.join(format!("{}.json", pack_id))
-  }
-}
-
-/// Checks if an application is installed and available in the system PATH.
-///
-/// Returns `true` if the application is found in PATH, `false` otherwise.
-fn is_app_installed(app_name: &str) -> bool {
-  #[cfg(target_os = "windows")]
-  {
-    std::process::Command::new("where")
-      .arg(app_name)
-      .output()
-      .map(|output| output.status.success())
-      .unwrap_or(false)
-  }
-
-  #[cfg(any(target_os = "macos", target_os = "linux"))]
-  {
-    std::process::Command::new("which")
-      .arg(app_name)
-      .output()
-      .map(|output| output.status.success())
-      .unwrap_or(false)
   }
 }

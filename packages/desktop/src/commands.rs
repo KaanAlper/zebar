@@ -7,17 +7,13 @@ use crate::common::macos::WindowExtMacOs;
 #[cfg(target_os = "windows")]
 use crate::common::windows::WindowExtWindows;
 use crate::{
-  marketplace_installer::MarketplaceInstaller,
   providers::{
     ProviderConfig, ProviderFunction, ProviderFunctionResponse,
     ProviderManager,
   },
   shell_state::{ShellCommandArgs, ShellState},
   widget_factory::{WidgetFactory, WidgetOpenOptions, WidgetState},
-  widget_pack::{
-    CreateWidgetConfigArgs, CreateWidgetPackArgs, UpdateWidgetPackArgs,
-    WidgetConfig, WidgetPack, WidgetPackManager, WidgetPlacement,
-  },
+  widget_pack::{WidgetPack, WidgetPackManager, WidgetPlacement},
 };
 
 #[tauri::command]
@@ -93,76 +89,6 @@ pub async fn stop_widget_preset(
 }
 
 #[tauri::command]
-pub async fn create_widget_pack(
-  args: CreateWidgetPackArgs,
-  widget_pack_manager: State<'_, Arc<WidgetPackManager>>,
-) -> anyhow::Result<WidgetPack, String> {
-  widget_pack_manager
-    .create_widget_pack(args)
-    .await
-    .map_err(|err| err.to_string())
-}
-
-#[tauri::command]
-pub async fn update_widget_pack(
-  pack_id: String,
-  args: UpdateWidgetPackArgs,
-  widget_pack_manager: State<'_, Arc<WidgetPackManager>>,
-) -> anyhow::Result<WidgetPack, String> {
-  widget_pack_manager
-    .update_widget_pack(&pack_id, args)
-    .await
-    .map_err(|err| err.to_string())
-}
-
-#[tauri::command]
-pub async fn delete_widget_pack(
-  pack_id: String,
-  widget_pack_manager: State<'_, Arc<WidgetPackManager>>,
-) -> anyhow::Result<(), String> {
-  widget_pack_manager
-    .delete_widget_pack(&pack_id)
-    .await
-    .map_err(|err| err.to_string())
-}
-
-#[tauri::command]
-pub async fn create_widget_config(
-  args: CreateWidgetConfigArgs,
-  widget_pack_manager: State<'_, Arc<WidgetPackManager>>,
-) -> anyhow::Result<WidgetConfig, String> {
-  widget_pack_manager
-    .create_widget_config(args)
-    .await
-    .map_err(|err| err.to_string())
-}
-
-#[tauri::command]
-pub async fn update_widget_config(
-  pack_id: String,
-  widget_name: String,
-  new_config: WidgetConfig,
-  widget_pack_manager: State<'_, Arc<WidgetPackManager>>,
-) -> Result<WidgetConfig, String> {
-  widget_pack_manager
-    .update_widget_config(&pack_id, &widget_name, new_config)
-    .await
-    .map_err(|err| err.to_string())
-}
-
-#[tauri::command]
-pub async fn delete_widget_config(
-  pack_id: String,
-  widget_name: String,
-  widget_pack_manager: State<'_, Arc<WidgetPackManager>>,
-) -> anyhow::Result<(), String> {
-  widget_pack_manager
-    .delete_widget_config(&pack_id, &widget_name)
-    .await
-    .map_err(|err| err.to_string())
-}
-
-#[tauri::command]
 pub async fn listen_provider(
   config_hash: String,
   config: ProviderConfig,
@@ -193,48 +119,6 @@ pub async fn call_provider_function(
 ) -> anyhow::Result<ProviderFunctionResponse, String> {
   provider_manager
     .call_function(config_hash, function)
-    .await
-    .map_err(|err| err.to_string())
-}
-
-#[tauri::command]
-pub async fn install_widget_pack(
-  pack_id: String,
-  version: String,
-  tarball_url: String,
-  is_preview: bool,
-  marketplace_manager: State<'_, Arc<MarketplaceInstaller>>,
-) -> anyhow::Result<WidgetPack, String> {
-  marketplace_manager
-    .install(&pack_id, &version, &tarball_url, is_preview)
-    .await
-    .map_err(|err| err.to_string())
-}
-
-#[tauri::command]
-pub async fn start_preview_widget(
-  pack_config: WidgetPack,
-  widget_name: String,
-  preset_name: String,
-  widget_factory: State<'_, Arc<WidgetFactory>>,
-) -> anyhow::Result<(), String> {
-  widget_factory
-    .start_widget_by_pack(
-      &pack_config,
-      &widget_name,
-      &WidgetOpenOptions::Preset(preset_name),
-      true,
-    )
-    .await
-    .map_err(|err| err.to_string())
-}
-
-#[tauri::command]
-pub async fn stop_all_preview_widgets(
-  widget_factory: State<'_, Arc<WidgetFactory>>,
-) -> anyhow::Result<(), String> {
-  widget_factory
-    .stop_all_previews()
     .await
     .map_err(|err| err.to_string())
 }

@@ -40,7 +40,48 @@ fn build_asset_server() -> rocket::Rocket<rocket::Build> {
     .configure(
       rocket::Config::figment().merge(("port", ASSET_SERVER_PORT)),
     )
-    .mount("/", routes![sw_js, normalize_css, init, serve])
+    .mount("/", routes![sw_js, normalize_css, init, instance, serve])
+}
+
+/// Logical Lunge: identifies the process serving the port (see
+/// `setup_asset_server`).
+#[get("/__zebar/instance")]
+fn instance() -> String {
+  std::process::id().to_string()
+}
+
+/// Whether this process's asset server answers on the port.
+///
+/// A connection alone isn't enough: during a restart the port can still be
+/// served by the previous Zebar, which doesn't know this instance's widget
+/// tokens (widgets then showed an error page and the bar stayed empty).
+async fn is_own_server_up() -> bool {
+  use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+  let Ok(mut stream) =
+    tokio::net::TcpStream::connect(("127.0.0.1", ASSET_SERVER_PORT)).await
+  else {
+    return false;
+  };
+
+  let request = "GET /__zebar/instance HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+  if stream.write_all(request.as_bytes()).await.is_err() {
+    return false;
+  }
+
+  let mut response = String::new();
+  let read = tokio::time::timeout(
+    Duration::from_millis(500),
+    stream.read_to_string(&mut response),
+  )
+  .await;
+
+  matches!(read, Ok(Ok(_)))
+    && response.starts_with("HTTP/1.1 200")
+    && response
+      .rsplit("\r\n\r\n")
+      .next()
+      .is_some_and(|body| body.trim() == std::process::id().to_string())
 }
 
 pub async fn setup_asset_server() -> anyhow::Result<()> {
@@ -63,14 +104,12 @@ pub async fn setup_asset_server() -> anyhow::Result<()> {
     }
   });
 
-  // Don't open any widget before the server accepts connections, so a
-  // widget never loads a "connection refused" page.
+  // Don't open any widget before this process's server answers, so a
+  // widget never loads a "connection refused" page or reaches the previous
+  // instance's server.
   let deadline = Instant::now() + Duration::from_secs(30);
   while Instant::now() < deadline {
-    if tokio::net::TcpStream::connect(("127.0.0.1", ASSET_SERVER_PORT))
-      .await
-      .is_ok()
-    {
+    if is_own_server_up().await {
       return Ok(());
     }
     tokio::time::sleep(Duration::from_millis(50)).await;

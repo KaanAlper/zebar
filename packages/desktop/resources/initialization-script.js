@@ -1,3 +1,32 @@
+// Logical Lunge: widgets are part of the shell, not web pages. The browser's own
+// context menu (Reload / Save as / Print / Inspect) and its reload, print, save,
+// find, view-source, zoom and back/forward keys are disabled. Only the default
+// action is prevented, so a widget's own right-click and key handlers still run;
+// text editing keys (Ctrl+A/C/V/X/Z/Y, Ctrl+arrows) are untouched.
+(() => {
+  const BLOCKED_KEYS = new Set(['F3', 'F5', 'F7', 'F12', 'BrowserBack', 'BrowserForward', 'BrowserRefresh']);
+  const BLOCKED_CTRL = new Set(['r', 'p', 's', 'f', 'g', 'u', 'o', 'j', 'h', 'd', 'l', 'n', 't', 'w', '+', '=', '-', '0']);
+
+  document.addEventListener('contextmenu', e => e.preventDefault(), true);
+  document.addEventListener(
+    'keydown',
+    e => {
+      const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+      const ctrl = e.ctrlKey || e.metaKey;
+      if (
+        BLOCKED_KEYS.has(key) ||
+        (ctrl && BLOCKED_CTRL.has(key)) ||
+        (ctrl && e.shiftKey && ['i', 'j', 'c'].includes(key)) ||
+        (e.altKey && !ctrl && (key === 'ArrowLeft' || key === 'ArrowRight'))
+      ) {
+        e.preventDefault();
+      }
+    },
+    true,
+  );
+  document.addEventListener('wheel', e => e.ctrlKey && e.preventDefault(), { capture: true, passive: false });
+})();
+
 // Clear console every 15 minutes.
 setInterval(
   () => {
